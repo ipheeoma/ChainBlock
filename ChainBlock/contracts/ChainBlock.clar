@@ -15,9 +15,9 @@
 (define-constant ERR_EXCESSIVE_CLAIM (err u111))
 
 ;; Core storage definitions
-(define-data-var insurance-pool uint u0)
+(define-data-var protection-pool uint u0)
 (define-data-var contract-owner principal tx-sender)
-(define-map insured-clients principal uint)
+(define-map protected-clients principal uint)
 (define-map claim-history { claimant: principal, amount: uint } { status: (string-ascii 20), timestamp: uint, paid-amount: uint })
 
 ;; Claim expiration in blocks
@@ -27,12 +27,12 @@
 (define-public (register-coverage (coverage-amount uint))
   (let ((client tx-sender))
     (asserts! (> coverage-amount u0) ERR_ZERO_VALUE)
-    (asserts! (is-none (map-get? insured-clients client)) ERR_DUPLICATE_COVERAGE)
+    (asserts! (is-none (map-get? protected-clients client)) ERR_DUPLICATE_COVERAGE)
     (match (stx-transfer? coverage-amount client (as-contract tx-sender))
       success (begin
-        (var-set insurance-pool (+ (var-get insurance-pool) coverage-amount))
-        (map-set insured-clients client coverage-amount)
-        (print { event: "coverage-acquired", insured-value: coverage-amount, purchaser: client })
+        (var-set protection-pool (+ (var-get protection-pool) coverage-amount))
+        (map-set protected-clients client coverage-amount)
+        (print { event: "coverage-acquired", protected-value: coverage-amount, purchaser: client })
         (ok true))
       error (err error))))
 
@@ -40,14 +40,14 @@
 (define-public (submit-claim (claim-amount uint))
   (let (
     (client tx-sender)
-    (insured-amount (default-to u0 (map-get? insured-clients client)))
+    (protected-amount (default-to u0 (map-get? protected-clients client)))
   )
     (asserts! (> claim-amount u0) ERR_ZERO_VALUE)
-    (asserts! (is-some (map-get? insured-clients client)) ERR_NOT_COVERED)
-    (asserts! (>= insured-amount claim-amount) ERR_FUNDS_INSUFFICIENT)
+    (asserts! (is-some (map-get? protected-clients client)) ERR_NOT_COVERED)
+    (asserts! (>= protected-amount claim-amount) ERR_FUNDS_INSUFFICIENT)
     (asserts! (is-none (map-get? claim-history { claimant: client, amount: claim-amount })) ERR_CLAIM_PROCESSED)
-    (map-set claim-history { claimant: client, amount: claim-amount } { status: "pending", timestamp: block-height, paid-amount: u0 })
-    (print { event: "claim-requested", claimant: client, claim-amount: claim-amount, timestamp: block-height })
+    (map-set claim-history { claimant: client, amount: claim-amount } { status: "pending", timestamp: stacks-block-height, paid-amount: u0 })
+    (print { event: "claim-requested", claimant: client, claim-amount: claim-amount, timestamp: stacks-block-height })
     (ok true)))
 
 ;; Calculate payout
@@ -61,23 +61,23 @@
   (let (
     (claim-key { claimant: claimant, amount: claim-amount })
     (claim-info (unwrap! (map-get? claim-history claim-key) ERR_NO_CLAIM_FOUND))
-    (pool-balance (var-get insurance-pool))
-    (insured-amount (unwrap! (map-get? insured-clients claimant) ERR_NOT_COVERED))
+    (pool-balance (var-get protection-pool))
+    (protected-amount (unwrap! (map-get? protected-clients claimant) ERR_NOT_COVERED))
   )
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_ACCESS_DENIED)
     (asserts! (is-eq (get status claim-info) "pending") ERR_CLAIM_PROCESSED)
     (asserts! (> pool-balance u0) ERR_EMPTY_RESERVE)
-    (asserts! (<= claim-amount insured-amount) ERR_EXCESSIVE_CLAIM)
-    (asserts! (< (- block-height (get timestamp claim-info)) EXPIRATION_LIMIT) ERR_PREMATURE_CLAIM)
+    (asserts! (<= claim-amount protected-amount) ERR_EXCESSIVE_CLAIM)
+    (asserts! (< (- stacks-block-height (get timestamp claim-info)) EXPIRATION_LIMIT) ERR_PREMATURE_CLAIM)
     (let ((payout-amount (calculate-payout claim-amount pool-balance)))
       (match (as-contract (stx-transfer? payout-amount tx-sender claimant))
         success (begin
-          (var-set insurance-pool (- pool-balance payout-amount))
+          (var-set protection-pool (- pool-balance payout-amount))
           (if (< payout-amount claim-amount)
-              (map-set claim-history claim-key { status: "partial", timestamp: block-height, paid-amount: payout-amount })
+              (map-set claim-history claim-key { status: "partial", timestamp: stacks-block-height, paid-amount: payout-amount })
               (begin
                 (map-delete claim-history claim-key)
-                (map-delete insured-clients claimant)))
+                (map-delete protected-clients claimant)))
           (print { event: "claim-settled", claimant: claimant, claim-amount: claim-amount, payout: payout-amount })
           (ok payout-amount))
         error (err error)))))
@@ -90,11 +90,11 @@
   )
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_ACCESS_DENIED)
     (asserts! (is-eq (get status claim-info) "pending") ERR_CLAIM_PROCESSED)
-    (asserts! (< (- block-height (get timestamp claim-info)) EXPIRATION_LIMIT) ERR_PREMATURE_CLAIM)
+    (asserts! (< (- stacks-block-height (get timestamp claim-info)) EXPIRATION_LIMIT) ERR_PREMATURE_CLAIM)
     (map-set claim-history claim-key { status: "denied", timestamp: (get timestamp claim-info), paid-amount: u0 })
     (print { event: "claim-rejected", claimant: claimant, claim-amount: claim-amount })
     (ok true)))
 
 ;; Check current fund reserve
 (define-read-only (check-reserve)
-  (ok (var-get insurance-pool)))
+  (ok (var-get protection-pool)))
